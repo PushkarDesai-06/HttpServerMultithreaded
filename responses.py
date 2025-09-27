@@ -26,12 +26,6 @@ Content-Type: {content_type}
 
 
 def sendHttp500(conn: socket.socket):
-    """
-    Send HTTP 500 Internal Server Error response.
-    
-    Args:
-        conn: The socket connection to send the response through
-    """
     content = ""
     # Load the error page template from file
     with open("errorpages/500.html", "r") as file:
@@ -61,16 +55,8 @@ def sendHttp404(conn: socket.socket):
 
 
 def sendHttp403(conn: socket.socket):
-    """
-    Send HTTP 403 Forbidden response.
-    Used when access to a resource is denied (e.g., directory traversal attempts).
-    
-    Args:
-        conn: The socket connection to send the response through
-    """
     content = ""
-    # Load error page (currently using 404 template - should have dedicated 403.html)
-    with open("./errorpages/404.html", "r") as file:
+    with open("./errorpages/403.html", "r") as file:
         content = file.read()
     # Send forbidden response indicating access is not allowed
     sendHttpRes(
@@ -83,16 +69,8 @@ def sendHttp403(conn: socket.socket):
 
 
 def sendHttp405(conn: socket.socket):
-    """
-    Send HTTP 405 Method Not Allowed response.
-    Used when the HTTP method (e.g., POST, PUT) is not supported by the server.
-    
-    Args:
-        conn: The socket connection to send the response through
-    """
     content = ""
-    # Load error page (currently using 404 template - should have dedicated 405.html)
-    with open("./errorpages/404.html", "r") as file:
+    with open("./errorpages/405.html", "r") as file:
         content = file.read()
     # Send method not allowed response
     sendHttpRes(
