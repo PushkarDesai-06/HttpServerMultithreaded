@@ -1,46 +1,53 @@
 from concurrent.futures import ThreadPoolExecutor
-import re
 import socket
-import sys
 import os
 import logging
+import sys
 import threading
-import time
-from wsgiref.handlers import format_date_time
-
-from responses import sendHttp403
-from utils import parseHttp
-
+import responses as res
 
 class HTTPServer:
 
-    def __init__(self, host="127.0.0.1", port=8080, max_threads=10):
-        self.host = host
-        self.port = port
-        self.max_threads = max_threads
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_threads)
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        logging.basicConfig(filename="./logfile.log")
+    def __init__(self, host, port, max_threads):
+        self._host = host
+        self._port = port
+        self._max_threads = max_threads
+        self._thread_pool = ThreadPoolExecutor(max_workers=max_threads)
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Prevents address already being used issue
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        logging.basicConfig(
+            level=logging.DEBUG,  # Minimum level to capture
+            format="[ %(asctime)s ] - %(levelname)s - %(message)s",
+        )
 
     def start(self):
-        socket.bind((self.host, self.port))
-        print(f"Server bound to {self.host} on port: {self.port}")
-        print("Press Ctrl + C to exit")
-        while True:
-            try:
-                conn, addr = socket.accept()
-                self.thread_pool.submit(self.handleClient, conn, addr)
-            except Exception as e:
-                print(e)
-                socket.close()
+        try:
+            self._socket.bind((self._host, self._port))
+            self._socket.listen()
+            logging.info(f"Server running on {self._host}:{self._port}")
+            logging.info("Press Ctrl + C to exit")
+            while True:
+                try:
+                    conn, addr = self._socket.accept()
+                    self._thread_pool.submit(self.handleClient, conn, addr)
+                except KeyboardInterrupt:
+                    logging.info("Server shutting down...")
+                    self._socket.close()
+                except Exception as e:
+                    logging.error(e)
+                    self._socket.close()
+                    return
+        except Exception as e:
+            logging.error(f"Could not start the server! Check input arguments. \nError: {e}")
 
     def handleClient(self, conn: socket.socket, addr: str):
         try:
             threadName = threading.current_thread().name
-            print(f"{threadName}-> Connection from {addr}")
+            logging.info(f"{threadName}-> Connection from {addr}")
+            
             while True:
-                data = conn.recv(1024)
+                data = conn.recv(8192)
                 if not data:
                     conn.close()
                     return
@@ -51,74 +58,85 @@ class HTTPServer:
                     return
                 first_line = lines[0].split(" ")
                 if len(first_line) < 3:
-                    self.sendHttp400(conn)  # Bad request
+                    logging.error("")
+                    res.sendHttp400(conn)  # Bad request
                     conn.close()
                     return
-                
-                request = parseHttp(data)
-                print(f"{threadName}-> Request: {request.req_type} {request.req_path} {request.req_version}")
-                allowed_hosts = [f'{self.host}:{self.port}']
-                
-                if request.headers.host == "":
-                    self.sendHttp400(conn)
+
+                request = self.parseHttp(data)
+                logging.info(
+                    f"{threadName}-> Request: {request['req_type']} {request['req_path']} {request['req_version']}"
+                )
+                # Fix property access
+                allowed_hosts = [f"{self._host}:{self._port}" , f"localhost:{self._port}"]
+
+                if request['headers'].get('host', '') == "":
+                    res.sendHttp400(conn)
                     conn.close()
                     return
-                if request.headers.host not in allowed_hosts:
-                    sendHttp403(conn)
+                if request['headers'].get('host', '') not in allowed_hosts:
+                    print(request['headers']['host'])
+                    res.sendHttp403(conn)
                     conn.close()
-                    return 
-                
-                if request.req_path == "/":
-                    request.req_path = "/index.html"  # Default file
+                    return
+
+                if request['req_path'] == "/":
+                    request['req_path'] = "/index.html"  # Default file
+                    res.sendHttpHtml(conn , file_path='./resources/index.html')
+                    continue
                 # Remove starting slash and join with resources
-                clean_path = request.req_path.lstrip("/")
+                clean_path = request['req_path'].lstrip("/")
                 joined_path = os.path.join("resources", clean_path)
                 file_path = os.path.normpath(joined_path)
-                print(f"{threadName}-> File path: {file_path}")
+                logging.info(f"{threadName}-> File path: {file_path}")
                 # Security check - ensuring path stays within resources directory
                 if (
                     not file_path.startswith("resources" + os.sep)
-                    and file_path != "resources"
+                    and not file_path == "resources"
                 ):
-                    print(f"{threadName}-> Path traversal attempt detected")
-                    self.sendHttp403(conn)
-                elif request.req_type != "GET" or request.req_type != "POST":
-                    self.sendHttp405(conn)
+                    logging.info(f"{threadName}-> Path traversal attempt detected")
+                    res.sendHttp403(conn)
+                # Fix logic error - should be 'and' not 'or'
+                elif request['req_type'] != "GET" and request['req_type'] != "POST":
+                    res.sendHttp405(conn)
                 elif not os.path.exists(file_path):
-                    print(f"{threadName}-> File not found")
-                    self.sendHttp404(conn)
+                    logging.error(f"{threadName}-> File not found")
+                    res.sendHttp404(conn)
                 elif os.path.isdir(file_path):
-                    print(f"{threadName}-> Directory access not allowed")
-                    self.sendHttp403(conn)
+                    logging.warning(f"{threadName}-> Directory access not allowed")
+                    res.sendHttp403(conn)
                 else:
                     try:
-                        with open(file_path, "r", encoding="utf-8") as file:
-                            content = file.read()
-                        # Determine content type based on file extension
-                        allowed_extensions = ['.html' , '.txt' , '.png' , '.jpg' , '.jpeg']
+                        allowed_extensions = [".html", ".txt", ".png", ".jpg", ".jpeg"]
                         _, ext = os.path.splitext(file_path)
-                        if ext not in allowed_extensions :
-                            self.sendHttp415(conn)
-                        content_type = "text/html; charset=utf-8"
-                        if ext != ".html":
-                            content_type = "application/octet-stream"
-                        self.sendHttpRes(
-                            conn,
-                            status_code=200,
-                            status="OK",
-                            content_type=content_type,
-                            body=content,
-                        )
-                        print(f"{threadName}-> File served successfully")
+                        if ext not in allowed_extensions:
+                            res.sendHttp415(conn)
+                        elif ext == ".html":
+                            res.sendHttpHtml(
+                                conn,
+                                file_path=file_path
+                            )
+                        else:
+                            res.sendHttpBin(
+                                conn,
+                                file_path=file_path
+                            )
+                        logging.info(f"{threadName}-> File served successfully")
                     except (IOError, OSError) as e:
-                        print(f"{threadName}-> Error reading file: {e}")
-                        self.sendHttp500(conn)
-                if (request.headers.connection == "close") or ((request.headers.connection == "") and request.req_version == "HTTP/1.0"): #check for connection to clise the connection 
+                        logging.info(f"{threadName}-> Error reading file: {e}")
+                        res.sendHttp500(conn)
+            
+                if (request['headers'].get('connection', '') == "close") or (
+                    (request['headers'].get('connection', '') == "")
+                    and request['req_version'] == "HTTP/1.0"
+                ):  # check for connection to close the connection
                     conn.close()
-                    break    
-        except Exception as e:
-            print(f"{threadName}-> Error serving request {e}")
+                    break
+        except KeyboardInterrupt as e:
             conn.close()
+            raise e
+        except Exception as e:
+            logging.error(f"{threadName}-> Error serving request {e}")
 
     def parseHttp(self, request: str):
         try:
@@ -130,13 +148,12 @@ class HTTPServer:
             request_object["req_type"] = first_line[0]
             request_object["req_path"] = first_line[1]
             request_object["req_version"] = first_line[2]
-            headers = {"connection" : ''}
-            for line in lines:
-                if line == "": #empty line
+            headers = {"connection": ""}
+            for line in lines[1:]:
+                if line == "":  # empty line
                     break
-                key, value = line.split(":")
-                value = value.removeprefix(" ")
-                headers[key] = value
+                key , value = line.split(": ")
+                headers[key.lower()] = value.lower()
             request_object["headers"] = headers
             body_lines = request.split("\r\n\r\n")[1]
             body = {}
@@ -146,124 +163,29 @@ class HTTPServer:
                     value = value.removeprefix(" ")
                     body[key] = value
             request_object["body"] = body
+            
+            # !!!! debug
+            # logging.debug(request_object)
+            
             return request_object
         except Exception as e:
+            logging.error(e)
             raise e
 
-    def sendHttpRes(
-        conn: socket.socket,
-        status_code: int,
-        status: str,
-        content_type: str,
-        body: str,
-        headers: dict,
-    ):
-        current_rfc7231_time = format_date_time(time.time())
-        # Construct the HTTP response following HTTP/1.1 protocol
-        response = f"""
-        HTTP/1.1 {status_code} {status}
-        Content-Type: {content_type}
-        Content-Length: {len(body.encode("utf-8"))}
-        Date: {current_rfc7231_time}
-        Server: Multi-threaded HTTP Server
-        {[f"{key}: {value}" for key , value in headers].join('\n')}
-        
-        {body}"""
-        # Send the response as bytes over the socket connection
-        conn.send(response.encode())
+args = sys.argv
+host = "127.0.0.1"
+port = 8080
+max_threads = 10
 
-    def sendHttpHtml(self , conn : socket.socket , file_path : str):
-        
-        content = ''
-        with open(file_path , "r") as file:
-            content = file.read()
-        
-        self.sendHttpRes(
-            conn,
-            status_code=200,
-            status="OK",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
+try:
+    if len(args) > 1:
+        port = int(args[1])
+    if len(args) > 2:
+        host = args[2]
+    if len(args) > 3:
+        max_threads = int(args[3])
+except Exception as e:
+    logging.error(e)
 
-    # def
-
-    def sendHttp500(self, conn: socket.socket):
-        content = ""
-        # Load the error page template from file
-        with open("errorpages/500.html", "r") as file:
-            content = file.read()
-        # Send the error response with appropriate status code and content
-        self.sendHttpRes(
-            conn,
-            status_code=500,
-            status="Internal Server Error",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-
-    def sendHttp400(self, conn: socket.socket):
-        content = ""
-        with open("./errorpages/400.html", "r") as file:
-            content = file.read()
-        # Send the error response indicating the requested resource was not found
-        self.sendHttpRes(
-            conn,
-            status_code=404,
-            status="Not Found",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-
-    def sendHttp404(self, conn: socket.socket):
-        content = ""
-        with open("./errorpages/404.html", "r") as file:
-            content = file.read()
-        # Send the error response indicating the requested resource was not found
-        self.sendHttpRes(
-            conn,
-            status_code=404,
-            status="Not Found",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-
-    def sendHttp403(self, conn: socket.socket):
-        content = ""
-        with open("./errorpages/403.html", "r") as file:
-            content = file.read()
-        # Send forbidden response indicating access is not allowed
-        self.sendHttpRes(
-            conn,
-            status_code=403,
-            status="Forbidden",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-
-    def sendHttp405(self, conn: socket.socket):
-        content = ""
-        with open("./errorpages/405.html", "r") as file:
-            content = file.read()
-        # Send method not allowed response
-        self.sendHttpRes(
-            conn,
-            status_code=405,
-            status="Method Not Allowed",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-    
-    def sendHttp415(self, conn: socket.socket):
-        content = ""
-        with open("./errorpages/415.html", "r") as file:
-            content = file.read()
-        # Send method not allowed response
-        self.sendHttpRes(
-            conn,
-            status_code=415,
-            status="Unsupported Media Type",
-            content_type="text/html; charset=utf-8",
-            body=content,
-        )
-        
+server = HTTPServer(host=host, port=port, max_threads=max_threads)
+server.start()

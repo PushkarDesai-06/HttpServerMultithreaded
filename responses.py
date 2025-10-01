@@ -1,34 +1,84 @@
+import os
 import socket
+import time
+from wsgiref.handlers import format_date_time
 
 
 def sendHttpRes(
-    conn: socket.socket, status_code: int, status: str, content_type: str, body: str
+    conn: socket.socket,
+    status_code: int,
+    status: str,
+    content_type: str,
+    body: str,
+    headers: dict,
+    version: str = "1.1",
+    isBinary: bool = False,
 ):
-    """
-    Send a generic HTTP response with specified parameters.
-    
-    Args:
-        conn: The socket connection to send the response through
-        status_code: HTTP status code (e.g., 200, 404, 500)
-        status: HTTP status message (e.g., "OK", "Not Found")
-        content_type: MIME type of the response content
-        body: The actual content/body of the response
-    """
-    # Construct the HTTP response following HTTP/1.1 protocol
-    response = f"""
-HTTP/1.1 {status_code} {status}
-Content-Length: {len(body.encode("utf-8"))}
-Content-Type: {content_type}
+    current_rfc7231_time = format_date_time(time.time())
+    content_length = len(body) if isBinary else len(body.encode())
 
-{body}"""
-    # Send the response as bytes over the socket connection
-    conn.send(response.encode())
+    header_lines = [
+        f"HTTP/{version} {status_code} {status}",
+        f"Content-Type: {content_type}",
+        f"Content-Length: {content_length}",
+        f"Date: {current_rfc7231_time}",
+        "Server: Multi-threaded HTTP Server",
+    ]
+    for key, value in headers.items():
+        header_lines.append(f"{key}: {value}")
+
+    response_headers = '\r\n'.join(header_lines) + '\r\n\r\n'
+    response_bytes = response_headers.encode()
+    
+    if isBinary:
+        body_bytes = body  
+    else:
+        body_bytes = body.encode()
+    
+    conn.sendall(response_bytes + body_bytes)
+
+
+def sendHttpHtml(conn: socket.socket, file_path: str):
+    content = ""
+    with open(file_path, "r") as file:
+        content = file.read()
+
+    sendHttpRes(
+        conn,
+        status_code=200,
+        status="OK",
+        content_type="text/html; charset=utf-8",
+        body=content,
+        headers={},
+    )
+
+
+def sendHttpBin(conn: socket.socket, file_path: str):
+    try:
+        with open(file_path, "rb") as file:
+            content = file.read()
+
+        file_name = os.path.basename(file_path)
+        sendHttpRes(
+            conn,
+            status_code=200,
+            status="OK",
+            content_type="application/octet-stream",
+            body=content,
+            headers={
+                "Content-Disposition": f'attachment; filename="{file_name}"',
+                "Connection": "keep-alive",
+            },
+            isBinary=True,
+        )
+    except Exception as e:
+        raise e
 
 
 def sendHttp500(conn: socket.socket):
     content = ""
     # Load the error page template from file
-    with open("errorpages/500.html", "r") as file:
+    with open("./errorpages/500.html", "r") as file:
         content = file.read()
     # Send the error response with appropriate status code and content
     sendHttpRes(
@@ -37,6 +87,22 @@ def sendHttp500(conn: socket.socket):
         status="Internal Server Error",
         content_type="text/html; charset=utf-8",
         body=content,
+        headers={},
+    )
+
+
+def sendHttp400(conn: socket.socket):
+    content = ""
+    with open("./errorpages/400.html", "r") as file:
+        content = file.read()
+    # Send the error response indicating the requested resource was not found
+    sendHttpRes(
+        conn,
+        status_code=400,
+        status="Not Found",
+        content_type="text/html; charset=utf-8",
+        body=content,
+        headers={},
     )
 
 
@@ -51,6 +117,7 @@ def sendHttp404(conn: socket.socket):
         status="Not Found",
         content_type="text/html; charset=utf-8",
         body=content,
+        headers={},
     )
 
 
@@ -65,6 +132,7 @@ def sendHttp403(conn: socket.socket):
         status="Forbidden",
         content_type="text/html; charset=utf-8",
         body=content,
+        headers={},
     )
 
 
@@ -79,4 +147,20 @@ def sendHttp405(conn: socket.socket):
         status="Method Not Allowed",
         content_type="text/html; charset=utf-8",
         body=content,
+        headers={},
+    )
+
+
+def sendHttp415(conn: socket.socket):
+    content = ""
+    with open("./errorpages/415.html", "r") as file:
+        content = file.read()
+    # Send method not allowed response
+    sendHttpRes(
+        conn,
+        status_code=415,
+        status="Unsupported Media Type",
+        content_type="text/html; charset=utf-8",
+        body=content,
+        headers={},
     )
